@@ -51,6 +51,18 @@ func resourceAwsDataSyncLocationS3() *schema.Resource {
 					},
 				},
 			},
+			"s3_storage_class": {
+				Type:     schema.TypeString,
+				Optional: true,
+				ValidateFunc: validation.StringInSlice([]string{
+					datasync.S3StorageClassStandard,
+					datasync.S3StorageClassStandardIa,
+					datasync.S3StorageClassOnezoneIa,
+					datasync.S3StorageClassIntelligentTiering,
+					datasync.S3StorageClassGlacier,
+					datasync.S3StorageClassDeepArchive,
+				}, false),
+			},
 			"subdirectory": {
 				Type:     schema.TypeString,
 				Required: true,
@@ -79,10 +91,11 @@ func resourceAwsDataSyncLocationS3Create(d *schema.ResourceData, meta interface{
 	conn := meta.(*AWSClient).datasyncconn
 
 	input := &datasync.CreateLocationS3Input{
-		S3BucketArn:  aws.String(d.Get("s3_bucket_arn").(string)),
-		S3Config:     expandDataSyncS3Config(d.Get("s3_config").([]interface{})),
-		Subdirectory: aws.String(d.Get("subdirectory").(string)),
-		Tags:         keyvaluetags.New(d.Get("tags").(map[string]interface{})).IgnoreAws().DatasyncTags(),
+		S3BucketArn:    aws.String(d.Get("s3_bucket_arn").(string)),
+		S3Config:       expandDataSyncS3Config(d.Get("s3_config").([]interface{})),
+		S3StorageClass: aws.String(d.Get("s3_storage_class").(string)),
+		Subdirectory:   aws.String(d.Get("subdirectory").(string)),
+		Tags:           keyvaluetags.New(d.Get("tags").(map[string]interface{})).IgnoreAws().DatasyncTags(),
 	}
 
 	log.Printf("[DEBUG] Creating DataSync Location S3: %s", input)
@@ -157,6 +170,7 @@ func resourceAwsDataSyncLocationS3Read(d *schema.ResourceData, meta interface{})
 		return fmt.Errorf("error setting s3_config: %s", err)
 	}
 
+	d.Set("s3_storage_class", output.S3StorageClass)
 	d.Set("subdirectory", subdirectory)
 	d.Set("uri", output.LocationUri)
 
