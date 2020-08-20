@@ -77,6 +77,7 @@ func expandDataSyncOptions(l []interface{}) *datasync.Options {
 		PosixPermissions:     aws.String(m["posix_permissions"].(string)),
 		Uid:                  aws.String(m["uid"].(string)),
 		VerifyMode:           aws.String(m["verify_mode"].(string)),
+		LogLevel:             aws.String(m["log_level"].(string)),
 	}
 
 	if v, ok := m["bytes_per_second"]; ok && v.(int) > 0 {
@@ -152,6 +153,7 @@ func flattenDataSyncOptions(options *datasync.Options) []interface{} {
 		"preserve_devices":       aws.StringValue(options.PreserveDevices),
 		"uid":                    aws.StringValue(options.Uid),
 		"verify_mode":            aws.StringValue(options.VerifyMode),
+		"log_level":              aws.StringValue(options.LogLevel),
 	}
 
 	return []interface{}{m}
