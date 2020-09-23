@@ -3,6 +3,7 @@ package aws
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -32,15 +33,15 @@ func resourceAwsDataSyncTask() *schema.Resource {
 				Computed: true,
 			},
 			"cloudwatch_log_group_arn": {
-				Type:     schema.TypeString,
-				Optional: true,
-				ForceNew: true,
+				Type:         schema.TypeString,
+				Optional:     true,
+				ValidateFunc: validateArn,
 			},
 			"destination_location_arn": {
 				Type:         schema.TypeString,
 				Required:     true,
 				ForceNew:     true,
-				ValidateFunc: validation.NoZeroValues,
+				ValidateFunc: validateArn,
 			},
 			"name": {
 				Type:     schema.TypeString,
@@ -155,11 +156,29 @@ func resourceAwsDataSyncTask() *schema.Resource {
 					},
 				},
 			},
+			"schedule": {
+				Type:     schema.TypeList,
+				Optional: true,
+				MaxItems: 1,
+				Elem: &schema.Resource{
+					Schema: map[string]*schema.Schema{
+						"schedule_expression": {
+							Type:     schema.TypeString,
+							Required: true,
+							ValidateFunc: validation.All(
+								validation.StringLenBetween(1, 256),
+								validation.StringMatch(regexp.MustCompile(`^[a-zA-Z0-9\ \_\*\?\,\|\^\-\/\#\s\(\)\+]*$`),
+									"Schedule expressions must have the following syntax: rate(<number>\\\\s?(minutes?|hours?|days?)), cron(<cron_expression>) or at(yyyy-MM-dd'T'HH:mm:ss)."),
+							),
+						},
+					},
+				},
+			},
 			"source_location_arn": {
 				Type:         schema.TypeString,
 				Required:     true,
 				ForceNew:     true,
-				ValidateFunc: validation.NoZeroValues,
+				ValidateFunc: validateArn,
 			},
 			"tags": tagsSchema(),
 		},
@@ -176,6 +195,10 @@ func resourceAwsDataSyncTaskCreate(d *schema.ResourceData, meta interface{}) err
 		Tags:                   keyvaluetags.New(d.Get("tags").(map[string]interface{})).IgnoreAws().DatasyncTags(),
 	}
 
+	if v, ok := d.GetOk("schedule"); ok {
+		input.Schedule = expandAwsDataSyncTaskSchedule(v.([]interface{}))
+	}
+
 	if v, ok := d.GetOk("cloudwatch_log_group_arn"); ok {
 		input.CloudWatchLogGroupArn = aws.String(v.(string))
 	}
@@ -187,7 +210,7 @@ func resourceAwsDataSyncTaskCreate(d *schema.ResourceData, meta interface{}) err
 	log.Printf("[DEBUG] Creating DataSync Task: %s", input)
 	output, err := conn.CreateTask(input)
 	if err != nil {
-		return fmt.Errorf("error creating DataSync Task: %s", err)
+		return fmt.Errorf("error creating DataSync Task: %w", err)
 	}
 
 	d.SetId(aws.StringValue(output.TaskArn))
@@ -200,7 +223,7 @@ func resourceAwsDataSyncTaskCreate(d *schema.ResourceData, meta interface{}) err
 	err = resource.Retry(d.Timeout(schema.TimeoutCreate), func() *resource.RetryError {
 		taskOutput, err := conn.DescribeTask(taskInput)
 
-		if isAWSErr(err, "InvalidRequestException", "not found") {
+		if isAWSErr(err, datasync.ErrCodeInvalidRequestException, "not found") {
 			return resource.RetryableError(err)
 		}
 
@@ -223,18 +246,18 @@ func resourceAwsDataSyncTaskCreate(d *schema.ResourceData, meta interface{}) err
 	})
 	if isResourceTimeoutError(err) {
 		taskOutput, err = conn.DescribeTask(taskInput)
-		if isAWSErr(err, "InvalidRequestException", "not found") {
-			return fmt.Errorf("Task not found after creation: %s", err)
+		if isAWSErr(err, datasync.ErrCodeInvalidRequestException, "not found") {
+			return fmt.Errorf("Task not found after creation: %w", err)
 		}
 		if err != nil {
-			return fmt.Errorf("Error describing task after creation: %s", err)
+			return fmt.Errorf("Error describing task after creation: %w", err)
 		}
 		if aws.StringValue(taskOutput.Status) == datasync.TaskStatusCreating {
 			return fmt.Errorf("Data sync task status has not finished creating")
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("error waiting for DataSync Task (%s) creation: %s", d.Id(), err)
+		return fmt.Errorf("error waiting for DataSync Task (%s) creation: %w", d.Id(), err)
 	}
 
 	return resourceAwsDataSyncTaskRead(d, meta)
@@ -251,14 +274,14 @@ func resourceAwsDataSyncTaskRead(d *schema.ResourceData, meta interface{}) error
 	log.Printf("[DEBUG] Reading DataSync Task: %s", input)
 	output, err := conn.DescribeTask(input)
 
-	if isAWSErr(err, "InvalidRequestException", "not found") {
+	if isAWSErr(err, datasync.ErrCodeInvalidRequestException, "not found") {
 		log.Printf("[WARN] DataSync Task %q not found - removing from state", d.Id())
 		d.SetId("")
 		return nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("error reading DataSync Task (%s): %s", d.Id(), err)
+		return fmt.Errorf("error reading DataSync Task (%s): %w", d.Id(), err)
 	}
 
 	d.Set("arn", output.TaskArn)
@@ -267,7 +290,11 @@ func resourceAwsDataSyncTaskRead(d *schema.ResourceData, meta interface{}) error
 	d.Set("name", output.Name)
 
 	if err := d.Set("options", flattenDataSyncOptions(output.Options)); err != nil {
-		return fmt.Errorf("error setting options: %s", err)
+		return fmt.Errorf("error setting options: %w", err)
+	}
+
+	if err := d.Set("schedule", flattenAwsDataSyncTaskSchedule(output.Schedule)); err != nil {
+		return fmt.Errorf("error setting schedule: %w", err)
 	}
 
 	d.Set("source_location_arn", output.SourceLocationArn)
@@ -275,11 +302,11 @@ func resourceAwsDataSyncTaskRead(d *schema.ResourceData, meta interface{}) error
 	tags, err := keyvaluetags.DatasyncListTags(conn, d.Id())
 
 	if err != nil {
-		return fmt.Errorf("error listing tags for DataSync Task (%s): %s", d.Id(), err)
+		return fmt.Errorf("error listing tags for DataSync Task (%s): %w", d.Id(), err)
 	}
 
 	if err := d.Set("tags", tags.IgnoreAws().IgnoreConfig(ignoreTagsConfig).Map()); err != nil {
-		return fmt.Errorf("error setting tags: %s", err)
+		return fmt.Errorf("error setting tags: %w", err)
 	}
 
 	return nil
@@ -288,16 +315,35 @@ func resourceAwsDataSyncTaskRead(d *schema.ResourceData, meta interface{}) error
 func resourceAwsDataSyncTaskUpdate(d *schema.ResourceData, meta interface{}) error {
 	conn := meta.(*AWSClient).datasyncconn
 
-	if d.HasChanges("options", "name") {
-		input := &datasync.UpdateTaskInput{
-			Options: expandDataSyncOptions(d.Get("options").([]interface{})),
-			Name:    aws.String(d.Get("name").(string)),
-			TaskArn: aws.String(d.Id()),
-		}
+	input := &datasync.UpdateTaskInput{
+		TaskArn: aws.String(d.Id()),
+	}
+	needsUpdate := false
 
+	if d.HasChanges("options") {
+		input.Options = expandDataSyncOptions(d.Get("options").([]interface{}))
+		needsUpdate = true
+	}
+
+	if d.HasChanges("name") {
+		input.Name = aws.String(d.Get("name").(string))
+		needsUpdate = true
+	}
+
+	if d.HasChanges("cloudwatch_log_group_arn") {
+		input.CloudWatchLogGroupArn = aws.String(d.Get("cloudwatch_log_group_arn").(string))
+		needsUpdate = true
+	}
+
+	if d.HasChanges("schedule") {
+		input.Schedule = expandAwsDataSyncTaskSchedule(d.Get("schedule").([]interface{}))
+		needsUpdate = true
+	}
+
+	if needsUpdate {
 		log.Printf("[DEBUG] Updating DataSync Task: %s", input)
 		if _, err := conn.UpdateTask(input); err != nil {
-			return fmt.Errorf("error creating DataSync Task: %s", err)
+			return fmt.Errorf("error creating DataSync Task: %w", err)
 		}
 	}
 
@@ -305,7 +351,7 @@ func resourceAwsDataSyncTaskUpdate(d *schema.ResourceData, meta interface{}) err
 		o, n := d.GetChange("tags")
 
 		if err := keyvaluetags.DatasyncUpdateTags(conn, d.Id(), o, n); err != nil {
-			return fmt.Errorf("error updating DataSync Task (%s) tags: %s", d.Id(), err)
+			return fmt.Errorf("error updating DataSync Task (%s) tags: %w", d.Id(), err)
 		}
 	}
 
@@ -322,13 +368,39 @@ func resourceAwsDataSyncTaskDelete(d *schema.ResourceData, meta interface{}) err
 	log.Printf("[DEBUG] Deleting DataSync Task: %s", input)
 	_, err := conn.DeleteTask(input)
 
-	if isAWSErr(err, "InvalidRequestException", "not found") {
+	if isAWSErr(err, datasync.ErrCodeInvalidRequestException, "not found") {
 		return nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("error deleting DataSync Task (%s): %s", d.Id(), err)
+		return fmt.Errorf("error deleting DataSync Task (%s): %w", d.Id(), err)
 	}
 
 	return nil
+}
+
+func expandAwsDataSyncTaskSchedule(l []interface{}) *datasync.TaskSchedule {
+	if len(l) == 0 || l[0] == nil {
+		return nil
+	}
+
+	m := l[0].(map[string]interface{})
+
+	schedule := &datasync.TaskSchedule{
+		ScheduleExpression: aws.String(m["schedule_expression"].(string)),
+	}
+
+	return schedule
+}
+
+func flattenAwsDataSyncTaskSchedule(schedule *datasync.TaskSchedule) []interface{} {
+	if schedule == nil {
+		return []interface{}{}
+	}
+
+	m := map[string]interface{}{
+		"schedule_expression": aws.StringValue(schedule.ScheduleExpression),
+	}
+
+	return []interface{}{m}
 }
